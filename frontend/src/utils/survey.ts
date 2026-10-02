@@ -1,4 +1,5 @@
-import type { ClosureResult, Station } from '@/types'
+import type { ClosureResult, ExcludedReading, Segment, Station } from '@/types'
+import { closureDetailWithExclusions } from '@/utils/instrument'
 
 /** 角度转弧度 */
 export function toRadians(deg: number): number {
@@ -113,7 +114,7 @@ export function stakeRangeOverlap(a1: number, a2: number, b1: number, b2: number
  * 闭合差：把每站的方位角与水平距分解为东向/北向增量，
  * 导线闭合差即累计位移向量的模。
  */
-export function computeClosure(stations: Station[], threshold = 0.25): ClosureResult {
+export function computeClosure(stations: Station[], threshold = 0.25, excluded: ExcludedReading[] = []): ClosureResult {
   let east = 0
   let north = 0
   for (const station of stations) {
@@ -132,6 +133,65 @@ export function computeClosure(stations: Station[], threshold = 0.25): ClosureRe
     count: stations.length,
     east: round(east, 3),
     north: round(north, 3),
-    detail: `东向累计 ΣΔE = ${round(east, 3)} m，北向累计 ΣΔN = ${round(north, 3)} m，闭合差 f = √(ΣΔE² + ΣΔN²) = ${closure} m，阈值 ${threshold} m`
+    excluded,
+    detail: closureDetailWithExclusions(
+      `东向累计 ΣΔE = ${round(east, 3)} m，北向累计 ΣΔN = ${round(north, 3)} m，闭合差 f = √(ΣΔE² + ΣΔN²) = ${closure} m，阈值 ${threshold} m`,
+      excluded
+    )
   }
+}
+
+function sortStations(stations: Station[]): Station[] {
+  return [...stations].sort(
+    (a, b) =>
+      Number((a.code.match(/\d+/) ?? ['0'])[0]) - Number((b.code.match(/\d+/) ?? ['0'])[0]) ||
+      a.code.localeCompare(b.code, 'zh-Hans-CN', { numeric: true })
+  )
+}
+
+function stationLength(station: Station): number {
+  return station.horizontalDistance || computeHorizontal(station.dip, station.slopeDistance)
+}
+
+/** 仅按有效读数累计洞段实测长度 */
+export function measuredSegmentLength(stations: Station[]): number {
+  return round(sortStations(stations).reduce((sum, station) => sum + stationLength(station), 0), 3)
+}
+
+/**
+ * 按有效读数重算图幅锚点的全洞累计实测位置。
+ * 先把各洞段按桩号排序，再把锚点在桩号区间中的比例映射到该段有效导线长度上；
+ * 没有任何有效读数的洞段无法形成正式锚点。
+ */
+export function measuredAnchorPosition(
+  anchorStake: string,
+  segmentId: string,
+  segments: Segment[],
+  stationsBySegment: Map<string, Station[]>
+): number | null {
+  const target = segmentId ? segments.find((segment) => segment.id === segmentId) : undefined
+  if (!target) return null
+
+  const ordered = [...segments].sort((a, b) => stakeToNumber(a.startStake) - stakeToNumber(b.startStake))
+  let position = 0
+  const anchorValue = stakeToNumber(anchorStake)
+
+  for (const segment of ordered) {
+    const segmentStations = sortStations(stationsBySegment.get(segment.id) ?? [])
+    const length = measuredSegmentLength(segmentStations)
+    if (length <= 0) {
+      if (segment.id === segmentId) return null
+      continue
+    }
+
+    const start = stakeToNumber(segment.startStake)
+    const end = stakeToNumber(segment.endStake)
+    const span = Math.max(0, end - start)
+    if (segment.id === segmentId) {
+      const ratio = span > 0 ? Math.min(1, Math.max(0, (anchorValue - start) / span)) : 0
+      return round(position + length * ratio, 3)
+    }
+    position += length
+  }
+  return null
 }

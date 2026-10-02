@@ -1,19 +1,20 @@
 import { onUnmounted, reactive } from 'vue'
 import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
-import type { Cave, Segment, Sketch, Station } from '@/types'
+import type { Cave, Instrument, Segment, Sketch, Station } from '@/types'
 import { computeHorizontal, computeVertical } from '@/utils/survey'
 
 /** IndexedDB 数据结构版本号（升级迁移时使用） */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
 }
 
-/** Dexie 封装：洞穴 / 洞段 / 测点 / 草图 四张表 + 元数据表 */
+/** Dexie 封装：仪器档案 / 洞穴 / 洞段 / 测点 / 草图 五张表 + 元数据表 */
 class CaveSurveyDb extends Dexie {
+  instruments!: Table<Instrument, string>
   caves!: Table<Cave, string>
   segments!: Table<Segment, string>
   stations!: Table<Station, string>
@@ -30,7 +31,7 @@ class CaveSurveyDb extends Dexie {
       meta: 'key'
     })
     // v2：旧版测点记录缺少水平距/垂距，迁移时由斜距 + 倾角补齐
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         caves: 'id, name, region, archived',
         segments: 'id, caveId, code, type',
@@ -48,6 +49,35 @@ class CaveSurveyDb extends Dexie {
             }
             if (!Number.isFinite(station.verticalDistance)) {
               station.verticalDistance = computeVertical(station.dip, station.slopeDistance)
+            }
+          })
+      })
+    // v3：仪器室标定档案独立成表；旧读数没有仪器档案可对账，先归待确认
+    this.version(SCHEMA_VERSION)
+      .stores({
+        instruments: 'id, code, calibrationResult, retired, validUntil',
+        caves: 'id, name, region, archived',
+        segments: 'id, caveId, code, type',
+        stations: 'id, segmentId, code, date, instrumentNo, readingStatus',
+        sketches: 'id, segmentId, code, mergeOrder',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table<Station, string>('stations')
+          .toCollection()
+          .modify((station) => {
+            if (!Number.isFinite(station.horizontalDistance)) {
+              station.horizontalDistance = computeHorizontal(station.dip, station.slopeDistance)
+            }
+            if (!Number.isFinite(station.verticalDistance)) {
+              station.verticalDistance = computeVertical(station.dip, station.slopeDistance)
+            }
+            if (station.readingStatus !== 'adopted' && station.readingStatus !== 'archived') {
+              station.readingStatus = 'pending'
+            }
+            if (typeof station.isResurvey !== 'boolean') {
+              station.isResurvey = false
             }
           })
       })
@@ -96,18 +126,50 @@ export function useStore<T extends object>(store: StoreApi<T>): T {
 }
 
 /**
- * 首次打开时写入一套示例洞穴数据，保证各页面进入即有事可做。
- * 只在四张表都为空时执行一次。
+ * 首次打开时写入一套示例数据，保证各页面进入即有事可做。
+ * 只在五张业务表都为空时执行一次。
  */
 export async function seedDemoData(): Promise<void> {
   const caveCount = await db.caves.count()
   if (caveCount > 0) return
 
+  const today = new Date().toISOString().slice(0, 10)
   const caveId = 'cave_demo_001'
   const segmentA = 'seg_demo_001'
   const segmentB = 'seg_demo_002'
 
-  const today = new Date().toISOString().slice(0, 10)
+  await db.instruments.bulkPut([
+    {
+      id: 'ins_demo_001',
+      code: 'SOKKIA-2',
+      name: '电子罗盘/激光测距仪',
+      calibrationDate: today,
+      validUntil: '2027-09-30',
+      calibrationResult: '合格',
+      retired: false,
+      note: '仪器室当前在用仪器'
+    },
+    {
+      id: 'ins_demo_002',
+      code: 'BRUNTON-5',
+      name: '地质罗盘/测绳',
+      calibrationDate: '2024-01-10',
+      validUntil: '2025-01-09',
+      calibrationResult: '合格',
+      retired: false,
+      note: '标定已过期，正式成果停用，待补测'
+    },
+    {
+      id: 'ins_demo_003',
+      code: 'COMPASS-OLD',
+      name: '老式罗盘',
+      calibrationDate: '2023-06-01',
+      validUntil: '2024-05-31',
+      calibrationResult: '不合格',
+      retired: true,
+      note: '仪器室已停用并封存'
+    }
+  ])
 
   await db.caves.put({
     id: caveId,
@@ -168,6 +230,8 @@ export async function seedDemoData(): Promise<void> {
       surveyor: '陆昀',
       date: today,
       isClosurePoint: false,
+      readingStatus: 'adopted',
+      isResurvey: false,
       note: '入口段，左壁有崩塌堆积'
     },
     {
@@ -183,7 +247,43 @@ export async function seedDemoData(): Promise<void> {
       surveyor: '陆昀',
       date: today,
       isClosurePoint: true,
+      readingStatus: 'adopted',
+      isResurvey: false,
       note: '本段末站，已与 C-02 起点核对'
+    },
+    {
+      id: 'st_demo_003_old',
+      segmentId: segmentB,
+      code: 'P3',
+      bearing: 186.4,
+      dip: -67.6,
+      slopeDistance: 18.2,
+      horizontalDistance: computeHorizontal(-67.6, 18.2),
+      verticalDistance: computeVertical(-67.6, 18.2),
+      instrumentNo: 'BRUNTON-5',
+      surveyor: '覃羽',
+      date: '2025-03-18',
+      isClosurePoint: false,
+      readingStatus: 'archived',
+      isResurvey: false,
+      note: '原现场读数保留；仪器标定过期，等待补测'
+    },
+    {
+      id: 'st_demo_003_new',
+      segmentId: segmentB,
+      code: 'P3',
+      bearing: 187.1,
+      dip: -68.1,
+      slopeDistance: 18.05,
+      horizontalDistance: computeHorizontal(-68.1, 18.05),
+      verticalDistance: computeVertical(-68.1, 18.05),
+      instrumentNo: 'SOKKIA-2',
+      surveyor: '覃羽',
+      date: today,
+      isClosurePoint: true,
+      readingStatus: 'adopted',
+      isResurvey: true,
+      note: '补测读数，替代过期仪器旧读数进入成果'
     }
   ])
 

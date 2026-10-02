@@ -10,9 +10,11 @@ import { useClosureCheck } from '@/hooks/useClosureCheck'
 import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
+import { instrumentStore } from '@/stores/instrumentStore'
 import { sketchStore } from '@/stores/sketchStore'
 import { downloadCsv } from '@/utils/export'
-import { stakeToNumber } from '@/utils/survey'
+import { measuredAnchorPosition } from '@/utils/survey'
+import { effectiveStations, getExcludedReadings } from '@/utils/instrument'
 
 const CANVAS_W = 780
 const CANVAS_H = 300
@@ -22,6 +24,7 @@ const PX_PER_METER = 1.6
 const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
+const instrumentState = useStore(instrumentStore)
 const sketchState = useStore(sketchStore)
 
 const selectedCaveId = ref<string>(caveState.caves[0]?.id ?? '')
@@ -78,32 +81,69 @@ watch(
   { immediate: true }
 )
 
+/** 正式成果只使用测量组采用、且仪器室档案在测量当日有效的读数 */
+const effectiveStationMap = computed(() => {
+  const map = new Map<string, ReturnType<typeof effectiveStations>>()
+  caveSegments.value.forEach((segment) => {
+    const raw = stationState.stations.filter((station) => station.segmentId === segment.id)
+    map.set(segment.id, effectiveStations(raw, instrumentState.instruments))
+  })
+  return map
+})
+
+const excludedReadings = computed(() =>
+  getExcludedReadings(
+    stationState.stations.filter((station) =>
+      caveSegments.value.some((segment) => segment.id === station.segmentId)
+    ),
+    instrumentState.instruments
+  )
+)
+
 /** 洞段测点闭合差（拼合视图复用闭合差徽标） */
 const caveStations = computed(() =>
-  stationState.stations.filter((station) =>
-    caveSegments.value.some((segment) => segment.id === station.segmentId)
-  )
+  caveSegments.value.flatMap((segment) => effectiveStationMap.value.get(segment.id) ?? [])
 )
 const { result: closureResult } = useClosureCheck(caveStations)
 
-/** 按桩号锚点自动吸附：以最小锚点桩号为原点，按桩号差换算横向偏移 */
+/** 按有效读数重算锚点：以最小实测锚点为原点换算横向偏移；无有效读数的图幅保持原处 */
 function autoAlign(): void {
   const list = mergeSketches.value
   if (list.length === 0) {
     ElMessage.warning('当前洞穴暂无可拼合草图')
     return
   }
-  const base = Math.min(...list.map((sketch) => stakeToNumber(sketch.anchorStake)))
+  const positions = list.map((sketch) =>
+    measuredAnchorPosition(sketch.anchorStake, sketch.segmentId, caveSegments.value, effectiveStationMap.value)
+  )
+  const available = positions.filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+  if (available.length === 0) {
+    ElMessage.error('没有可用于定位锚点的有效读数；成果偏移保持原处，请先补测或采用读数')
+    snapLog.value = ['锚点重算失败：未找到有效读数，未移动任何图幅']
+    return
+  }
+  const base = Math.min(...available)
   const logs: string[] = []
-  list.forEach((sketch) => {
-    const stake = stakeToNumber(sketch.anchorStake)
-    const target = Math.round((stake - base) * PX_PER_METER)
+  let aligned = 0
+  list.forEach((sketch, index) => {
+    const measured = positions[index]
+    if (measured === null) {
+      snapped[sketch.id] = false
+      logs.push(`${sketch.code} 锚点 ${sketch.anchorStake}：洞段无有效读数，保持原偏移 ${offsets[sketch.id] ?? 0}px`)
+      return
+    }
+    const target = Math.round((measured - base) * PX_PER_METER)
     offsets[sketch.id] = target
     snapped[sketch.id] = true
-    logs.push(`${sketch.code} 锚点 ${sketch.anchorStake} → 偏移 ${target}px`)
+    aligned += 1
+    logs.push(`${sketch.code} 锚点 ${sketch.anchorStake} → 有效实测位置 ${measured}m / 偏移 ${target}px`)
   })
   snapLog.value = logs
-  ElMessage.success(`已按桩号锚点吸附 ${list.length} 张图幅`)
+  if (aligned < list.length) {
+    ElMessage.warning(`已重算 ${aligned} 张图幅，${list.length - aligned} 张因无有效读数保持原处`)
+  } else {
+    ElMessage.success(`已按有效读数重算并吸附 ${list.length} 张图幅`)
+  }
 }
 
 function onMouseDown(sketch: Sketch, event: MouseEvent): void {
@@ -147,6 +187,7 @@ interface MergeRow {
   code: string
   segment: string
   anchorStake: string
+  measuredAnchor: number | null
   offset: number
   snapped: boolean
 }
@@ -157,6 +198,12 @@ const mergeRows = computed<MergeRow[]>(() =>
     code: sketch.code,
     segment: segmentOf(sketch),
     anchorStake: sketch.anchorStake,
+    measuredAnchor: measuredAnchorPosition(
+      sketch.anchorStake,
+      sketch.segmentId,
+      caveSegments.value,
+      effectiveStationMap.value
+    ),
     offset: offsets[sketch.id] ?? 0,
     snapped: snapped[sketch.id] ?? false
   }))
@@ -181,6 +228,7 @@ function exportMergeTable(): void {
       { key: 'code', label: '草图编号' },
       { key: 'segment', label: '洞段' },
       { key: 'anchorStake', label: '锚点桩号' },
+      { key: 'measuredAnchor', label: '有效读数重算锚点(m)' },
       { key: 'offset', label: '对齐偏移(px)' },
       { key: 'snapped', label: '是否吸附' }
     ]
@@ -195,11 +243,11 @@ function exportMergeTable(): void {
       <div>
         <h2 class="page-title">图幅拼合视图</h2>
         <p class="page-sub">
-          拖动图幅可按相邻边缘吸附对齐，也可按桩号锚点一键对齐；下方输出拼合顺序表，顺序可直接调整。
+          拖动图幅可按相邻边缘吸附；锚点对齐只按有效读数重算，停用、过期、待确认或留档读数不会移动图幅。
         </p>
       </div>
       <div class="head-actions">
-        <el-button type="primary" @click="autoAlign">按桩号锚点吸附对齐</el-button>
+        <el-button type="primary" @click="autoAlign">按有效读数重算锚点</el-button>
         <el-button @click="exportMergeTable">导出拼合顺序表</el-button>
       </div>
     </div>
@@ -210,6 +258,8 @@ function exportMergeTable(): void {
       </el-select>
       <el-tag effect="plain">图幅 {{ mergeSketches.length }} 张</el-tag>
       <el-tag effect="plain">总宽 {{ totalWidth }} px</el-tag>
+      <el-tag type="success" effect="plain">正式有效读数 {{ caveStations.length }} 条</el-tag>
+      <el-tag v-if="excludedReadings.length" type="warning" effect="plain">排除 {{ excludedReadings.length }} 条</el-tag>
       <div class="seg-tags">
         <SegmentTag
           v-for="segment in caveSegments"
@@ -291,6 +341,14 @@ function exportMergeTable(): void {
           :detail="closureResult.detail"
           :count="caveStations.length"
         />
+        <el-card v-if="excludedReadings.length" shadow="never" class="log-card excluded-card">
+          <template #header>未进成果读数（含仪器）</template>
+          <ul class="log">
+            <li v-for="item in excludedReadings" :key="item.station.id">
+              {{ item.station.code }} / {{ item.station.instrumentNo || '未填仪器号' }}：{{ item.reason }}
+            </li>
+          </ul>
+        </el-card>
         <el-card shadow="never" class="log-card">
           <template #header>吸附记录</template>
           <ul class="log">
@@ -307,6 +365,12 @@ function exportMergeTable(): void {
       <el-table-column prop="code" label="草图编号" width="120" />
       <el-table-column prop="segment" label="洞段" width="120" />
       <el-table-column prop="anchorStake" label="桩号对齐锚点" width="150" />
+      <el-table-column label="重算锚点(m)" width="130">
+        <template #default="{ row }: { row: MergeRow }">
+          <span v-if="row.measuredAnchor !== null">{{ row.measuredAnchor }}</span>
+          <el-tag v-else type="warning" size="small" effect="plain">无有效读数</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="对齐偏移" width="120">
         <template #default="{ row }: { row: MergeRow }">{{ row.offset }} px</template>
       </el-table-column>
@@ -359,6 +423,10 @@ function exportMergeTable(): void {
   flex-direction: column;
   gap: 12px;
   width: 320px;
+}
+.excluded-card :deep(.el-card__body) {
+  max-height: 220px;
+  overflow: auto;
 }
 .log-card {
   border-radius: 12px;

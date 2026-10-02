@@ -9,6 +9,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '洞穴清单' }
   },
   {
+    path: '/instruments',
+    name: 'instruments',
+    component: () => import('@/pages/InstrumentsPage.vue'),
+    meta: { title: '仪器标定档案' }
+  },
+  {
     path: '/segments',
     name: 'segments',
     component: () => import('@/pages/SegmentsPage.vue'),

@@ -8,13 +8,16 @@ import { useStore } from '@/hooks/usePersistentStore'
 import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
+import { instrumentStore } from '@/stores/instrumentStore'
 import { sketchStore } from '@/stores/sketchStore'
 import { toRadians } from '@/utils/survey'
+import { effectiveStations, getExcludedReadings } from '@/utils/instrument'
 import { uid } from '@/utils/id'
 
 const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
+const instrumentState = useStore(instrumentStore)
 const sketchState = useStore(sketchStore)
 
 const CANVAS_W = 760
@@ -64,11 +67,15 @@ watch(
   { immediate: true }
 )
 
-const segmentStations = computed<Station[]>(() =>
+const rawSegmentStations = computed<Station[]>(() =>
   stationState.stations
     .filter((station) => station.segmentId === selectedSegmentId.value)
     .sort((a, b) => Number((a.code.match(/\d+/) ?? ['0'])[0]) - Number((b.code.match(/\d+/) ?? ['0'])[0]))
 )
+
+/** 草图折线只重算“测量组采用 + 仪器室标定有效”的读数；现场原读数仍留在测点页 */
+const segmentStations = computed<Station[]>(() => effectiveStations(rawSegmentStations.value, instrumentState.instruments))
+const excludedReadings = computed(() => getExcludedReadings(rawSegmentStations.value, instrumentState.instruments))
 
 /** 测点折线：以起点为原点，按方位角/水平距投影到平面坐标 */
 interface PlotPoint {
@@ -199,12 +206,27 @@ async function removeSketch(sketch: Sketch): Promise<void> {
       <el-select v-model="selectedSegmentId" placeholder="选择洞段" style="width: 220px">
         <el-option v-for="segment in segmentOptions" :key="segment.id" :label="segment.code" :value="segment.id" />
       </el-select>
-      <el-tag effect="plain">测点 {{ segmentStations.length }} 个</el-tag>
+      <el-tag effect="plain">有效读数 {{ segmentStations.length }} / 现场 {{ rawSegmentStations.length }}</el-tag>
+      <el-tag v-if="excludedReadings.length" type="warning" effect="plain">折线排除 {{ excludedReadings.length }} 条</el-tag>
       <el-tag effect="plain">草图 {{ segmentSketches.length }} 张</el-tag>
       <div class="base-bearing">
         <BearingInput v-model="baseBearing" kind="bearing" label="草图基准方位" @invalid="(msg: string) => ElMessage.warning(msg)" />
       </div>
     </div>
+
+    <el-alert
+      v-if="excludedReadings.length"
+      class="excluded-alert"
+      type="warning"
+      :closable="false"
+      title="草图折线已按有效读数重算"
+    >
+      <template #default>
+        <div v-for="item in excludedReadings" :key="item.station.id">
+          {{ item.station.code }} / {{ item.station.instrumentNo || '未填仪器号' }}：{{ item.reason }}
+        </div>
+      </template>
+    </el-alert>
 
     <div class="canvas-row">
       <GridCanvas
@@ -236,7 +258,7 @@ async function removeSketch(sketch: Sketch): Promise<void> {
           起点 K0
         </text>
         <text v-if="plotPoints.length === 0" :x="CANVAS_W / 2 - 90" :y="CANVAS_H / 2" font-size="13" fill="#8a97a3">
-          该洞段暂无测点，请先到「测点读数」录入
+          该洞段暂无可进入正式成果的有效读数；现场读数请到「测点读数」确认或补测
         </text>
         <defs>
           <marker id="dipArrowHead" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
@@ -307,6 +329,9 @@ async function removeSketch(sketch: Sketch): Promise<void> {
 <style scoped>
 .base-bearing {
   width: 240px;
+}
+.excluded-alert {
+  margin-bottom: 12px;
 }
 .canvas-row {
   display: flex;

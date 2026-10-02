@@ -8,12 +8,15 @@ import { useStore } from '@/hooks/usePersistentStore'
 import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
+import { instrumentStore } from '@/stores/instrumentStore'
 import { stakeRangeOverlap, stakeToNumber } from '@/utils/survey'
+import { effectiveStations } from '@/utils/instrument'
 import { uid } from '@/utils/id'
 
 const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
+const instrumentState = useStore(instrumentStore)
 
 const filterCaveId = ref<string>('')
 const filterType = ref<SegmentType | ''>('')
@@ -59,8 +62,10 @@ function caveName(caveId: string): string {
   return caveState.caves.find((cave) => cave.id === caveId)?.name ?? '未归属洞穴'
 }
 
-function stationCount(segmentId: string): number {
-  return stationState.stations.filter((station) => station.segmentId === segmentId).length
+function stationCount(segmentId: string): string {
+  const raw = stationState.stations.filter((station) => station.segmentId === segmentId)
+  const effective = effectiveStations(raw, instrumentState.instruments).length
+  return `${effective}/${raw.length}`
 }
 
 function resetForm(): void {
@@ -148,7 +153,7 @@ async function applyBatchClosed(closed: boolean): Promise<void> {
 }
 
 async function removeSegment(segment: Segment): Promise<void> {
-  const count = stationCount(segment.id)
+  const count = stationState.stations.filter((station) => station.segmentId === segment.id).length
   if (count > 0) {
     ElMessage.error(`洞段「${segment.code}」下仍有 ${count} 个测点，请先清理`)
     return
@@ -226,7 +231,7 @@ async function removeSegment(segment: Segment): Promise<void> {
         <template #default="{ row }: { row: Segment }">{{ row.avgWidth }} × {{ row.avgHeight }}</template>
       </el-table-column>
       <el-table-column prop="slopeTrend" label="坡度趋势" width="120" />
-      <el-table-column label="测点数" width="90">
+      <el-table-column label="有效/现场读数" width="130">
         <template #default="{ row }: { row: Segment }">{{ stationCount(row.id) }}</template>
       </el-table-column>
       <el-table-column prop="sketchNo" label="草图序号" width="100" />
