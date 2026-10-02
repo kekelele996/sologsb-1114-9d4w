@@ -61,13 +61,13 @@ sologsb-1114/
 │   ├── nginx.conf              # try_files 前端路由回落 + gzip
 │   ├── public/favicon.svg
 │   └── src/
-│       ├── types/              # cave.ts / segment.ts / station.ts / sketch.ts / index.ts
-│       ├── stores/             # caveStore / segmentStore / stationStore / sketchStore（Zustand）
+│       ├── types/              # cave.ts / segment.ts / station.ts / sketch.ts / instrument.ts / index.ts
+│       ├── stores/             # caveStore / segmentStore / stationStore / sketchStore / instrumentStore（Zustand）
 │       ├── components/common/  # SegmentTag / BearingInput / ClosureBadge / GridCanvas
 │       ├── hooks/              # usePersistentStore / useClosureCheck
-│       ├── pages/              # CavesPage / SegmentsPage / StationsPage / SketchPage / MergePage
+│       ├── pages/              # CavesPage / SegmentsPage / StationsPage / SketchPage / MergePage / InstrumentsPage
 │       ├── router/index.ts
-│       └── utils/              # survey.ts / export.ts / id.ts
+│       └── utils/              # survey.ts / reading.ts / export.ts / id.ts
 ```
 
 ## 五、数据模型与存储
@@ -76,11 +76,15 @@ sologsb-1114/
 | --- | --- | --- |
 | Cave 洞穴 | 归属根节点：洞名、行政区、经纬度、海拔、发育层位、已知总长、负责人等 | `caves` |
 | Segment 洞段 | 起止桩号、类型（竖井/廊道/厅堂/裂隙/水道）、平均宽高、是否闭合 | `segments` |
-| Station 测点 | 方位角、倾角、斜距 → 自动推算水平距/垂距，累计闭合差 | `stations` |
+| Station 测点 | 方位角、倾角、斜距 → 自动推算水平距/垂距，累计闭合差；记录仪器号与测量组是否采用 | `stations` |
 | Sketch 草图 | 格数、比例、绘制人、拼合顺序号、桩号对齐锚点 | `sketches` |
+| Instrument 仪器标定档案 | 仪器号、标定日期、有效期、标定结论（合格/不合格）、状态（在用/停用） | `instruments` |
 
 - 数据库名 `gbcavesurvey`，`meta` 表保存 `schemaVersion`；
 - `version(2)` 升级迁移会把旧版测点记录由「斜距 + 倾角」补齐 `horizontalDistance` / `verticalDistance`；
+- `version(3)` 新增 `instruments` 仪器标定档案表；旧读数没有仪器档案，升级时一律置为 `adopted = false`，先归到**待确认**，待测量组与仪器室对账后按台建档、采用；
+- **两边数据分离**：标定结论听仪器室（仪器停用 / 标定过期 / 结论不合格 → 该仪器读数不计入成果），用哪条读数由测量组定（`Station.adopted` 开关）；现场读数始终保留、不删除，补测并采用后才回到成果；
+- 闭合差、草图折线、图幅拼合闭合差都只按**有效读数**（仪器可用且测量组采用）重算，被排除的读数会标明是哪台仪器；
 - 数据仅存于浏览器本地，容器无状态、不挂载命名卷，清除浏览器数据即清空。
 
 ## 六、主要页面
@@ -91,7 +95,8 @@ sologsb-1114/
 | `/segments` | 洞段编目表：按桩号区间/类型/洞穴筛选，批量调整洞段类型与闭合标记，自动累计总长 |
 | `/stations` | 测点读数录入：方位角/倾角专用输入（度分秒 ⇄ 十进制度），自动推算水平距垂距，实时闭合差徽标，异常读数整行高亮，支持连续录入下一站 |
 | `/sketch` | 草图工作台：坐标纸网格上绘制测点折线、标注桩号与倾角箭头，支持草图基准方位旋转与草图记录管理 |
-| `/merge` | 图幅拼合视图：拖动图幅按相邻边缘吸附、按桩号锚点一键对齐，输出可调整的拼合顺序表并支持 CSV 导出 |
+| `/merge` | 图幅拼合视图：拖动图幅按相邻边缘吸附、按桩号锚点一键对齐，输出可调整的拼合顺序表并支持 CSV 导出；闭合差只按有效读数重算 |
+| `/instruments` | 仪器标定档案：登记每台仪器的标定日期、有效期与结论，停用 / 过期 / 不合格的仪器其读数不计入成果；读数中出现但档案缺失的仪器号可按台「建档并采用」重试，成果保持原样不删除 |
 
 ## 七、计算约定
 

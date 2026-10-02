@@ -10,12 +10,17 @@ import { useClosureCheck } from '@/hooks/useClosureCheck'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
 import { caveStore } from '@/stores/caveStore'
+import { instrumentStore } from '@/stores/instrumentStore'
 import { computeHorizontal, computeVertical, formatDms, isValidBearing, isValidDip } from '@/utils/survey'
+import { instrumentIndex, isInstrumentUsable, validStations, verdictFor, type ReadingVerdict } from '@/utils/reading'
 import { nextCode, uid } from '@/utils/id'
 
 const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
+const instrumentState = useStore(instrumentStore)
+
+const today = new Date().toISOString().slice(0, 10)
 
 const selectedCaveId = ref<string>(caveState.caves[0]?.id ?? '')
 const selectedSegmentId = ref<string>('')
@@ -40,13 +45,30 @@ const segmentOptions = computed(() =>
 )
 const currentSegment = computed(() => segmentState.segments.find((segment) => segment.id === selectedSegmentId.value))
 
+const instrumentMap = computed(() => instrumentIndex(instrumentState.instruments))
+
+/** 本洞段全部读数（现场读数照旧留着，不删除） */
 const segmentStations = computed(() =>
   stationState.stations
     .filter((station) => station.segmentId === selectedSegmentId.value)
     .sort((a, b) => Number((a.code.match(/\d+/) ?? ['0'])[0]) - Number((b.code.match(/\d+/) ?? ['0'])[0]))
 )
 
-/** 已保存测点 + 当前待录入测点一起参与闭合差计算，实时反映累计闭合差 */
+/** 各读数的成果判定（有效 / 排除 / 待确认） */
+const verdicts = computed<Map<string, ReadingVerdict>>(() => {
+  const map = new Map<string, ReadingVerdict>()
+  for (const station of segmentStations.value) {
+    map.set(station.id, verdictFor(station, instrumentMap.value.get(station.instrumentNo.trim()), today))
+  }
+  return map
+})
+
+/** 进正式成果的有效读数：闭合差只按这些重算 */
+const validSegmentStations = computed(() => validStations(segmentStations.value, instrumentState.instruments, today))
+
+const excludedCount = computed(() => segmentStations.value.filter((s) => verdicts.value.get(s.id)?.state === 'excluded').length)
+const pendingCount = computed(() => segmentStations.value.filter((s) => verdicts.value.get(s.id)?.state === 'pending').length)
+
 const pendingStation = computed<Station>(() => ({
   id: 'pending',
   segmentId: selectedSegmentId.value,
@@ -57,13 +79,20 @@ const pendingStation = computed<Station>(() => ({
   horizontalDistance: previewHorizontal.value,
   verticalDistance: previewVertical.value,
   instrumentNo: form.instrumentNo,
+  adopted: true,
   surveyor: form.surveyor,
   date: form.date,
   isClosurePoint: form.isClosurePoint,
   note: form.note
 }))
 
-const closureInput = computed<Station[]>(() => [...segmentStations.value, pendingStation.value])
+/** 待录入读数若仪器不可用，也不进闭合差 */
+const pendingVerdict = computed(() =>
+  verdictFor(pendingStation.value, instrumentMap.value.get(form.instrumentNo.trim()), today)
+)
+const closureInput = computed<Station[]>(() =>
+  pendingVerdict.value.state === 'valid' ? [...validSegmentStations.value, pendingStation.value] : validSegmentStations.value
+)
 const { result: closureResult, over: closureOver } = useClosureCheck(closureInput)
 
 const previewHorizontal = computed(() => computeHorizontal(form.dip, form.slopeDistance))
@@ -78,11 +107,28 @@ function isAbnormal(station: Station): boolean {
 }
 
 function rowClassName(param: { row: Station }): string {
-  return isAbnormal(param.row) ? 'abnormal-row' : ''
+  const verdict = verdicts.value.get(param.row.id)
+  if (isAbnormal(param.row)) return 'abnormal-row'
+  if (verdict?.state === 'pending') return 'pending-row'
+  if (verdict?.state === 'excluded') return 'excluded-row'
+  return ''
 }
 
 function refreshDefaultCode(): void {
   form.code = nextCode('P', segmentStations.value.map((station) => station.code))
+}
+
+/** 采用开关是否禁用：仪器停用 / 过期 / 无档案时，测量组无法把它采进成果 */
+function adoptDisabled(station: Station): boolean {
+  const verdict = verdicts.value.get(station.id)
+  if (!verdict) return false
+  if (verdict.state === 'pending') return true
+  if (verdict.instrument && !isInstrumentUsable(verdict.instrument, today)) return true
+  return false
+}
+
+async function toggleAdopted(station: Station, adopted: boolean): Promise<void> {
+  await stationStore.getState().setAdopted(station.id, adopted)
 }
 
 // IndexedDB 数据是异步水合的，洞穴/洞段到达后自动选中第一条，避免空选
@@ -148,6 +194,7 @@ async function submit(continueNext: boolean): Promise<void> {
     horizontalDistance: previewHorizontal.value,
     verticalDistance: previewVertical.value,
     instrumentNo: form.instrumentNo.trim(),
+    adopted: existing?.adopted ?? true,
     surveyor: form.surveyor.trim(),
     date: form.date,
     isClosurePoint: form.isClosurePoint,
@@ -191,7 +238,7 @@ async function removeStation(station: Station): Promise<void> {
       <div>
         <h2 class="page-title">测点与读数录入</h2>
         <p class="page-sub">
-          录入前视方位角、倾角与斜距，系统自动推算水平距与垂距，并实时累计该洞段的导线闭合差；异常读数整行高亮。
+          录入前视方位角、倾角与斜距，系统自动推算水平距与垂距；闭合差只按有效读数（仪器标定合格且测量组采用）重算，被排除的读数会标明是哪台仪器。
         </p>
       </div>
       <el-tag v-if="lastSaved" type="success" effect="plain">最近保存：{{ lastSaved }}</el-tag>
@@ -240,7 +287,20 @@ async function removeStation(station: Station): Promise<void> {
         <el-row :gutter="16">
           <el-col :span="6">
             <el-form-item label="仪器号">
-              <el-input v-model="form.instrumentNo" />
+              <el-select
+                v-model="form.instrumentNo"
+                filterable
+                allow-create
+                placeholder="选择或输入仪器号"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="ins in instrumentState.instruments"
+                  :key="ins.id"
+                  :label="`${ins.instrumentNo} · ${ins.name}${ins.model ? ' ' + ins.model : ''}`"
+                  :value="ins.instrumentNo"
+                />
+              </el-select>
             </el-form-item>
           </el-col>
           <el-col :span="6">
@@ -267,6 +327,9 @@ async function removeStation(station: Station): Promise<void> {
           <el-tag effect="plain">垂距 {{ previewVertical.toFixed(3) }} m</el-tag>
           <el-tag effect="plain">方位角 {{ formatDms(form.bearing) }}</el-tag>
           <el-tag effect="plain">倾角 {{ formatDms(form.dip) }}</el-tag>
+          <el-tag v-if="pendingVerdict.state !== 'valid'" type="warning" effect="plain">
+            该仪器{{ pendingVerdict.state === 'pending' ? '无档案' : '不可用' }}，本读数不计入成果
+          </el-tag>
         </div>
         <div class="actions">
           <el-button type="primary" @click="submit(false)">{{ editingId ? '保存修改' : '保存测点' }}</el-button>
@@ -282,7 +345,7 @@ async function removeStation(station: Station): Promise<void> {
       :threshold="closureResult.threshold"
       :level="closureResult.level"
       :detail="closureResult.detail"
-      :count="segmentStations.length"
+      :count="validSegmentStations.length"
     />
     <el-alert
       v-if="closureOver"
@@ -293,7 +356,14 @@ async function removeStation(station: Station): Promise<void> {
       description="当前洞段累计闭合差超过阈值，建议复测异常测点或对读数做误差分配。"
     />
 
-    <h3 class="section-title">本洞段读数（{{ segmentStations.length }} 站）</h3>
+    <h3 class="section-title">
+      本洞段读数（{{ segmentStations.length }} 站）
+      <span class="summary">
+        <el-tag type="success" size="small" effect="plain">有效 {{ validSegmentStations.length }}</el-tag>
+        <el-tag type="info" size="small" effect="plain">排除 {{ excludedCount }}</el-tag>
+        <el-tag type="warning" size="small" effect="plain">待确认 {{ pendingCount }}</el-tag>
+      </span>
+    </h3>
     <el-table :data="segmentStations" border stripe :row-class-name="rowClassName">
       <el-table-column prop="code" label="桩号" width="90" />
       <el-table-column label="方位角" width="150">
@@ -305,7 +375,11 @@ async function removeStation(station: Station): Promise<void> {
       <el-table-column prop="slopeDistance" label="斜距(m)" width="100" />
       <el-table-column prop="horizontalDistance" label="水平距(m)" width="110" />
       <el-table-column prop="verticalDistance" label="垂距(m)" width="100" />
-      <el-table-column prop="instrumentNo" label="仪器号" width="110" />
+      <el-table-column prop="instrumentNo" label="仪器号" width="110">
+        <template #default="{ row }: { row: Station }">
+          <span class="mono">{{ row.instrumentNo || '—' }}</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="surveyor" label="测量人" width="90" />
       <el-table-column prop="date" label="日期" width="120" />
       <el-table-column label="闭合点" width="90">
@@ -314,10 +388,41 @@ async function removeStation(station: Station): Promise<void> {
           <span v-else class="muted">—</span>
         </template>
       </el-table-column>
-      <el-table-column label="读数状态" width="110">
+      <el-table-column label="读数状态" width="120">
         <template #default="{ row }: { row: Station }">
-          <el-tag v-if="isAbnormal(row)" type="danger" size="small" effect="dark">异常</el-tag>
-          <el-tag v-else type="success" size="small" effect="plain">正常</el-tag>
+          <el-tag
+            v-if="isAbnormal(row)"
+            type="danger"
+            size="small"
+            effect="dark"
+          >异常</el-tag>
+          <el-tag
+            v-else-if="verdicts.get(row.id)?.state === 'valid'"
+            type="success"
+            size="small"
+            effect="plain"
+          >有效</el-tag>
+          <el-tag
+            v-else-if="verdicts.get(row.id)?.state === 'pending'"
+            type="warning"
+            size="small"
+            effect="plain"
+          >待确认</el-tag>
+          <el-tag v-else type="info" size="small" effect="dark">排除</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="采用进成果" width="110">
+        <template #default="{ row }: { row: Station }">
+          <el-switch
+            :model-value="row.adopted"
+            :disabled="adoptDisabled(row)"
+            @change="(val: boolean) => toggleAdopted(row, val)"
+          />
+        </template>
+      </el-table-column>
+      <el-table-column label="排除 / 待确认原因" min-width="220" show-overflow-tooltip>
+        <template #default="{ row }: { row: Station }">
+          <span class="reason">{{ verdicts.get(row.id)?.state === 'valid' ? '—' : verdicts.get(row.id)?.reason }}</span>
         </template>
       </el-table-column>
       <el-table-column prop="note" label="备注" min-width="140" show-overflow-tooltip />
@@ -353,10 +458,32 @@ async function removeStation(station: Station): Promise<void> {
 .alert {
   margin-bottom: 12px;
 }
+.summary {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: 8px;
+  font-weight: 400;
+}
+.reason {
+  font-size: 12px;
+  color: #8a6d1f;
+}
 :deep(.abnormal-row) {
   background: #fdf2f2 !important;
 }
 :deep(.abnormal-row td) {
   color: #b03030;
+}
+:deep(.excluded-row) {
+  background: #f4f6f8 !important;
+}
+:deep(.excluded-row td) {
+  color: #9aa6b2;
+}
+:deep(.pending-row) {
+  background: #fdf6ec !important;
+}
+:deep(.pending-row td) {
+  color: #8a6d1f;
 }
 </style>

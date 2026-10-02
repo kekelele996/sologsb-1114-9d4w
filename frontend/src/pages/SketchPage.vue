@@ -9,13 +9,16 @@ import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
 import { sketchStore } from '@/stores/sketchStore'
+import { instrumentStore } from '@/stores/instrumentStore'
 import { toRadians } from '@/utils/survey'
+import { validStations } from '@/utils/reading'
 import { uid } from '@/utils/id'
 
 const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
 const sketchState = useStore(sketchStore)
+const instrumentState = useStore(instrumentStore)
 
 const CANVAS_W = 760
 const CANVAS_H = 440
@@ -70,6 +73,9 @@ const segmentStations = computed<Station[]>(() =>
     .sort((a, b) => Number((a.code.match(/\d+/) ?? ['0'])[0]) - Number((b.code.match(/\d+/) ?? ['0'])[0]))
 )
 
+/** 进正式成果的有效读数：草图折线只按这些重算，排除的读数不绘入 */
+const validSegmentStations = computed<Station[]>(() => validStations(segmentStations.value, instrumentState.instruments))
+
 /** 测点折线：以起点为原点，按方位角/水平距投影到平面坐标 */
 interface PlotPoint {
   station: Station
@@ -81,7 +87,7 @@ const rawPoints = computed<{ x: number; y: number; station: Station }[]>(() => {
   const points: { x: number; y: number; station: Station }[] = []
   let east = 0
   let north = 0
-  for (const station of segmentStations.value) {
+  for (const station of validSegmentStations.value) {
     const bearing = toRadians(station.bearing - baseBearing.value)
     east += station.horizontalDistance * Math.sin(bearing)
     north += station.horizontalDistance * Math.cos(bearing)
@@ -199,7 +205,9 @@ async function removeSketch(sketch: Sketch): Promise<void> {
       <el-select v-model="selectedSegmentId" placeholder="选择洞段" style="width: 220px">
         <el-option v-for="segment in segmentOptions" :key="segment.id" :label="segment.code" :value="segment.id" />
       </el-select>
-      <el-tag effect="plain">测点 {{ segmentStations.length }} 个</el-tag>
+      <el-tag effect="plain">
+        测点 {{ validSegmentStations.length }} / {{ segmentStations.length }} 站有效
+      </el-tag>
       <el-tag effect="plain">草图 {{ segmentSketches.length }} 张</el-tag>
       <div class="base-bearing">
         <BearingInput v-model="baseBearing" kind="bearing" label="草图基准方位" @invalid="(msg: string) => ElMessage.warning(msg)" />

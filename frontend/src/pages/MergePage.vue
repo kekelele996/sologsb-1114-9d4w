@@ -11,8 +11,10 @@ import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
 import { sketchStore } from '@/stores/sketchStore'
+import { instrumentStore } from '@/stores/instrumentStore'
 import { downloadCsv } from '@/utils/export'
 import { stakeToNumber } from '@/utils/survey'
+import { validStations } from '@/utils/reading'
 
 const CANVAS_W = 780
 const CANVAS_H = 300
@@ -23,6 +25,7 @@ const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
 const sketchState = useStore(sketchStore)
+const instrumentState = useStore(instrumentStore)
 
 const selectedCaveId = ref<string>(caveState.caves[0]?.id ?? '')
 const draggingId = ref<string | null>(null)
@@ -78,12 +81,14 @@ watch(
   { immediate: true }
 )
 
-/** 洞段测点闭合差（拼合视图复用闭合差徽标） */
-const caveStations = computed(() =>
+/** 洞穴全部读数（现场读数） */
+const caveAllStations = computed(() =>
   stationState.stations.filter((station) =>
     caveSegments.value.some((segment) => segment.id === station.segmentId)
   )
 )
+/** 进正式成果的有效读数：闭合差按有效读数重算，被排除的不计入 */
+const caveStations = computed(() => validStations(caveAllStations.value, instrumentState.instruments))
 const { result: closureResult } = useClosureCheck(caveStations)
 
 /** 按桩号锚点自动吸附：以最小锚点桩号为原点，按桩号差换算横向偏移 */
@@ -210,6 +215,8 @@ function exportMergeTable(): void {
       </el-select>
       <el-tag effect="plain">图幅 {{ mergeSketches.length }} 张</el-tag>
       <el-tag effect="plain">总宽 {{ totalWidth }} px</el-tag>
+      <el-tag type="success" effect="plain">有效读数 {{ caveStations.length }}</el-tag>
+      <el-tag type="info" effect="plain">排除 {{ caveAllStations.length - caveStations.length }}</el-tag>
       <div class="seg-tags">
         <SegmentTag
           v-for="segment in caveSegments"

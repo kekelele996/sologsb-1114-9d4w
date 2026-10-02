@@ -16,6 +16,12 @@ export interface Station {
   verticalDistance: number
   /** 仪器号 */
   instrumentNo: string
+  /**
+   * 测量组是否采用此读数进入正式成果（用哪条读数由测量组定）。
+   * 仪器停用 / 标定过期 / 无档案时，即使采用也不会计入成果；
+   * v2 旧数据升级时一律置为 false，先归到待确认。
+   */
+  adopted: boolean
   /** 测量人 */
   surveyor: string
   /** 测量日期 */

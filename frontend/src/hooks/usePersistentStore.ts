@@ -1,23 +1,24 @@
 import { onUnmounted, reactive } from 'vue'
 import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
-import type { Cave, Segment, Sketch, Station } from '@/types'
+import type { Cave, Instrument, Segment, Sketch, Station } from '@/types'
 import { computeHorizontal, computeVertical } from '@/utils/survey'
 
 /** IndexedDB 数据结构版本号（升级迁移时使用） */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
 }
 
-/** Dexie 封装：洞穴 / 洞段 / 测点 / 草图 四张表 + 元数据表 */
+/** Dexie 封装：洞穴 / 洞段 / 测点 / 草图 / 仪器标定档案 五张表 + 元数据表 */
 class CaveSurveyDb extends Dexie {
   caves!: Table<Cave, string>
   segments!: Table<Segment, string>
   stations!: Table<Station, string>
   sketches!: Table<Sketch, string>
+  instruments!: Table<Instrument, string>
   meta!: Table<MetaRow, string>
 
   constructor() {
@@ -30,7 +31,7 @@ class CaveSurveyDb extends Dexie {
       meta: 'key'
     })
     // v2：旧版测点记录缺少水平距/垂距，迁移时由斜距 + 倾角补齐
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         caves: 'id, name, region, archived',
         segments: 'id, caveId, code, type',
@@ -49,6 +50,24 @@ class CaveSurveyDb extends Dexie {
             if (!Number.isFinite(station.verticalDistance)) {
               station.verticalDistance = computeVertical(station.dip, station.slopeDistance)
             }
+          })
+      })
+    // v3：新增仪器标定档案表；旧读数没有仪器档案，升级时先归到待确认（adopted = false）
+    this.version(SCHEMA_VERSION)
+      .stores({
+        caves: 'id, name, region, archived',
+        segments: 'id, caveId, code, type',
+        stations: 'id, segmentId, code, date, instrumentNo',
+        sketches: 'id, segmentId, code, mergeOrder',
+        instruments: 'id, instrumentNo, status',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table<Station, string>('stations')
+          .toCollection()
+          .modify((station) => {
+            station.adopted = false
           })
       })
   }
@@ -165,6 +184,7 @@ export async function seedDemoData(): Promise<void> {
       horizontalDistance: computeHorizontal(-2.5, 12.4),
       verticalDistance: computeVertical(-2.5, 12.4),
       instrumentNo: 'SOKKIA-2',
+      adopted: true,
       surveyor: '陆昀',
       date: today,
       isClosurePoint: false,
@@ -180,12 +200,27 @@ export async function seedDemoData(): Promise<void> {
       horizontalDistance: computeHorizontal(-1.8, 15.8),
       verticalDistance: computeVertical(-1.8, 15.8),
       instrumentNo: 'SOKKIA-2',
+      adopted: true,
       surveyor: '陆昀',
       date: today,
       isClosurePoint: true,
       note: '本段末站，已与 C-02 起点核对'
     }
   ])
+
+  // 仪器标定档案：demo 读数所用的 SOKKIA-2 全站仪，标定合格、在用、在有效期内
+  await db.instruments.put({
+    id: 'ins_demo_001',
+    instrumentNo: 'SOKKIA-2',
+    name: '全站仪',
+    model: 'SET-2X',
+    calibrationDate: today,
+    validUntil: new Date(new Date().setFullYear(new Date().getFullYear() + 1)).toISOString().slice(0, 10),
+    conclusion: '合格',
+    status: '在用',
+    note: 'demo 档案：仪器室统一保管',
+    createdAt: new Date().toISOString()
+  })
 
   await db.sketches.bulkPut([
     {
